@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+data/
+airflow/logs/
+spark/jobs/*.pyc
+*.log
+.DS_Store
