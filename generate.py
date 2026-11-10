@@ -18,7 +18,7 @@ Faker.seed(42)
 # --- Конфигурация подключений ---
 MONGO_URI = "mongodb://admin:password@localhost:27017/"
 KAFKA_BROKER = "localhost:9092"
-KAFKA_TOPIC = "telemetry_raw"
+KAFKA_TOPIC = "telemetry.events"
 
 # --- Подключение к сервисам ---
 print("Подключение к MongoDB...")
@@ -293,6 +293,11 @@ for day_idx in range(TELEMETRY_DAYS):
         # Отправка в Kafka
         producer.send(KAFKA_TOPIC, event)
         messages_sent += 1
+
+        # Небольшая задержка, чтобы Grafana видела поток в реальном времени
+        if messages_sent % 100 == 0:
+            time.sleep(0.05) # 50 миллисекунд каждые 100 сообщений
+
         if messages_sent % 10000 == 0:
             print(f"     Отправлено: {messages_sent}...")
 

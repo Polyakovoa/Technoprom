@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS raw_telemetry (
 ) ENGINE = Kafka
 SETTINGS
     kafka_broker_list = 'kafka:9092',
-    kafka_topic_list = 'telemetry_raw',
+    kafka_topic_list = 'telemetry.events',
     kafka_group_name = 'clickhouse_consumer_group',
     kafka_format = 'JSONEachRow',
     kafka_num_consumers = 1;
