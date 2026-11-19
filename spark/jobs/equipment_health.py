@@ -26,7 +26,7 @@ df_sensors = spark.read.jdbc(url=jdbc_url, table="raw_sensors", properties=jdbc_
 df_failures = spark.read.jdbc(url=jdbc_url, table="raw_failures", properties=jdbc_props)
 df_tickets = spark.read.jdbc(url=jdbc_url, table="raw_repair_tickets", properties=jdbc_props)
 
-# Читаем телеметрию, конвертируя DateTime в String на стороне ClickHouse во избежание проблем с миллисекундами
+# Читаем телеметрию, конвертируя DateTime в String на стороне ClickHouse
 df_tel = spark.read.jdbc(url=jdbc_url, table="(SELECT *, toString(event_datetime) AS event_datetime_str FROM mart_telemetry)", properties=jdbc_props)
 
 # Определяем "текущую" дату
@@ -35,7 +35,7 @@ NOW_STR = max_date_row[0]
 NOW_TS = datetime.datetime.strptime(NOW_STR, '%Y-%m-%d %H:%M:%S')
 print(f"Расчетная текущая дата (max event_datetime): {NOW_TS}")
 
-# --- 1. Базовые фичи оборудования ---
+# 1. Базовые фичи оборудования
 df_base = df_eq.select(
     "equipment_id", "factory_id", "criticality", "commissioned_at", "last_maintenance_at", "maintenance_interval_days"
 ).withColumn(
@@ -47,7 +47,7 @@ df_base = df_eq.select(
     when(to_date(lit(NOW_TS)) > to_date(col("last_maintenance_at")) + col("maintenance_interval_days"), True).otherwise(False)
 )
 
-# --- 2. Агрегации по телеметрии ---
+# 2. Агрегации по телеметрии
 w_tel = Window.partitionBy("equipment_id", "sensor_id").orderBy("event_datetime_str")
 df_tel_gaps = df_tel.withColumn(
     "prev_dt", lag("event_datetime_str").over(w_tel)
@@ -91,7 +91,7 @@ df_missing = df_active_sensors.join(df_tel_24h_ids, on=["equipment_id", "sensor_
     .withColumn("sensor_data_missing", when(col("count") > 0, True).otherwise(False)) \
     .select("equipment_id", "sensor_data_missing")
 
-# --- 3. Агрегации по авариям ---
+# 3. Агрегации по авариям
 df_failures_clean = df_failures.withColumn("detected_ts", to_timestamp("detected_at"))
 now_str = NOW_TS.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -109,7 +109,7 @@ df_repeat_fail = df_failures_clean.filter(expr(f"detected_ts > CAST('{now_str}' 
     .filter(col("count") >= 2).select("equipment_id").distinct() \
     .withColumn("repeated_failure", lit(True))
 
-# --- 4. Агрегации по ремонтам ---
+# 4. Агрегации по ремонтам
 parts_schema = ArrayType(StructType([
     StructField("part_id", StringType(), True),
     StructField("quantity", IntegerType(), True),
@@ -150,7 +150,7 @@ df_after_repair = df_tickets_clean.select("equipment_id", "finished_ts") \
     .withColumn("failure_after_recent_repair", lit(True)) \
     .select("equipment_id", "failure_after_recent_repair")
 
-# --- 5. Сборка ---
+# 5. Сборка
 df_mart = df_base \
     .join(df_tel_24h, "equipment_id", "left") \
     .join(df_vib_press, "equipment_id", "left") \
@@ -176,7 +176,7 @@ df_mart = df_mart.withColumn("unstable_equipment",
     when(col("frequent_breakdown") | col("temperature_anomaly") | col("vibration_anomaly"), True).otherwise(False)
 )
 
-# --- 6. Health Score ---
+# 6. Health Score
 df_mart = df_mart.withColumn("health_score", 
     expr("""
         greatest(0, least(100, 
@@ -207,37 +207,15 @@ final_cols = [
 
 df_final = df_mart.select(*final_cols)
 
-# --- 7. Запись в ClickHouse ---
+# 7. Запись в ClickHouse
 print("Запись в ClickHouse...")
 df_final.write.jdbc(url=jdbc_url, table="equipment_health_mart", mode="append", properties=jdbc_props)
 
-# --- 8. Запись в MinIO (S3) ---
+# 8. Запись в MinIO (S3)
 print("Запись в MinIO...")
 bucket_name = "analytics-results"
 today_str = datetime.datetime.now().strftime("%Y_%m_%d")
 filename = f"equipment_health_{today_str}.parquet"
 tmp_path = f"s3a://{bucket_name}/tmp_output"
 
-df_final.coalesce(1).write.format("parquet").mode("overwrite").save(tmp_path)
-
-# --- ИСПРАВЛЕННЫЙ БЛОК ПЕРЕИМЕНОВАНИЯ ---
-from py4j.java_gateway import java_import
-java_import(spark._jvm, 'org.apache.hadoop.fs.Path')
-java_import(spark._jvm, 'org.apache.hadoop.fs.FileSystem')
-java_import(spark._jvm, 'java.net.URI')
-
-hadoop_conf = spark._jsc.hadoopConfiguration()
-# Явно получаем S3A файловую систему
-fs = spark._jvm.FileSystem.get(spark._jvm.URI(f"s3a://{bucket_name}"), hadoop_conf)
-
-src_dir = spark._jvm.Path(tmp_path)
-dst_file = spark._jvm.Path(f"s3a://{bucket_name}/{filename}")
-
-for file_status in fs.listStatus(src_dir):
-    if file_status.getPath().getName().startswith("part-"):
-        fs.rename(file_status.getPath(), dst_file)
-        break
-
-# Удаляем временную папку
-fs.delete(src_dir, True)
-print(f"✅ Файл успешно сохранен в MinIO: s3a://{bucket_name}/{filename}")
+spark.stop()

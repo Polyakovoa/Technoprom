@@ -1,0 +1,10 @@
+FROM apache/airflow:2.9.3
+
+# Переключаемся на пользователя airflow
+USER airflow
+
+# Устанавливаем переменные, чтобы pip работал корректно
+ENV PIP_USER=false
+
+# Устанавливаем все необходимые библиотеки
+RUN pip install --no-cache-dir clickhouse-connect boto3 pandas pyarrow

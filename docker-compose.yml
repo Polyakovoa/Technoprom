@@ -1,4 +1,7 @@
 x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
   image: apache/airflow:2.9.3
   environment:
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -9,10 +12,12 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
-    _PIP_ADDITIONAL_REQUIREMENTS: 'apache-airflow-providers-apache-spark apache-airflow-providers-mongo apache-airflow-providers-apache-kafka clickhouse-connect'
+
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./spark/jobs:/opt/airflow/spark_jobs
+    - ./scripts:/opt/airflow/scripts
+    - /var/run/docker.sock:/var/run/docker.sock
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     postgres:
