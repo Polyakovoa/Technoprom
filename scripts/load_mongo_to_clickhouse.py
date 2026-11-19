@@ -1,19 +1,43 @@
 """
 Загрузчик справочников из MongoDB в ClickHouse RAW.
-Запуск: python load_mongo_to_clickhouse.py
+Запуск: python scripts/load_mongo_to_clickhouse.py
 """
 import json
+import os
+from pathlib import Path
+
 import clickhouse_connect
+from dotenv import load_dotenv
 from pymongo import MongoClient
 
-MONGO_URI = "mongodb://admin:password@localhost:27017/"
-mongo = MongoClient(MONGO_URI)["technoprom"]
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
+
+def get_required_env(name: str) -> str:
+    """Возвращает переменную окружения или падает с понятной ошибкой."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Переменная окружения '{name}' не задана! "
+            f"Скопируйте .env.example в .env и заполните значения."
+        )
+    return value
+
+
+MONGO_USER = get_required_env("MONGO_USER")
+MONGO_PASSWORD = get_required_env("MONGO_PASSWORD")
+CH_USER = get_required_env("CLICKHOUSE_USER")
+CH_PASS = get_required_env("CLICKHOUSE_PASSWORD")
+
+MONGO_URI = f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@localhost:27017/"
+
+mongo = MongoClient(MONGO_URI)["technoprom"]
 ch = clickhouse_connect.get_client(
-    host="localhost", 
-    port=8123, 
-    username="default", 
-    password="changeme"
+    host="localhost",
+    port=8123,
+    username=CH_USER,
+    password=CH_PASS,
 )
 
 
@@ -51,12 +75,13 @@ def load(collection, table, transformer=None):
     print(f"  {collection} -> {table}: {len(rows)} строк")
 
 
-print("Загрузка справочников из MongoDB в ClickHouse RAW...")
-load("factories",      "raw_factories",      flatten_manager)
-load("equipment",      "raw_equipment")
-load("sensors",        "raw_sensors")
-load("engineers",      "raw_engineers")
-load("spare_parts",    "raw_spare_parts")
-load("failures",       "raw_failures")
-load("repair_tickets", "raw_repair_tickets", flatten_ticket)
-print("Готово.")
+if __name__ == "__main__":
+    print("Загрузка справочников из MongoDB в ClickHouse RAW...")
+    load("factories",      "raw_factories",      flatten_manager)
+    load("equipment",      "raw_equipment")
+    load("sensors",        "raw_sensors")
+    load("engineers",      "raw_engineers")
+    load("spare_parts",    "raw_spare_parts")
+    load("failures",       "raw_failures")
+    load("repair_tickets", "raw_repair_tickets", flatten_ticket)
+    print("Готово.")

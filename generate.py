@@ -4,18 +4,40 @@
 Запуск: python generate.py
 """
 import json
+import os
 import random
 from datetime import datetime, timedelta, timezone
 from faker import Faker
 from pymongo import MongoClient
 from kafka import KafkaProducer
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Загружаем .env из корня проекта
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 fake = Faker("ru_RU")
 random.seed(42)
 Faker.seed(42)
 
-# Конфигурация подключений
-MONGO_URI = "mongodb://admin:password@localhost:27017/"
+
+def get_required_env(name: str) -> str:
+    """Возвращает переменную окружения или падает с понятной ошибкой."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Переменная окружения '{name}' не задана! "
+            f"Скопируйте .env.example в .env и заполните значения."
+        )
+    return value
+
+
+# Конфигурация подключений (пароли теперь обязательны)
+MONGO_USER = get_required_env("MONGO_USER")
+MONGO_PASSWORD = get_required_env("MONGO_PASSWORD")
+MONGO_URI = f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@localhost:27017/"
+
 KAFKA_BROKER = "localhost:9092"
 KAFKA_TOPIC = "telemetry.events"
 
@@ -121,7 +143,6 @@ producer = KafkaProducer(
 
 
 # 1. ГЕНЕРАЦИЯ СПРАВОЧНИКОВ -> MONGODB
-
 print("[1/7] Factories...")
 factories = []
 for i, (region, city) in enumerate(REGIONS_CITIES, start=1):
@@ -253,7 +274,6 @@ for i in range(1, N_FAILURES + 1):
         "description": fake.sentence(nb_words=6),
         "acknowledged": random.random() < 0.75,
     }
-    # Dirty: неизвестное оборудование
     if random.random() < 0.003:
         f_dict["equipment_id"] = "eq-99999"
     failures.append(f_dict)
@@ -275,7 +295,6 @@ for i in range(1, N_TICKETS + 1):
 
     if status == "closed":
         finished = started + timedelta(minutes=random.randint(30, 480))
-        # Dirty: дата окончания раньше начала
         if random.random() < 0.02:
             finished = created - timedelta(minutes=random.randint(10, 120))
 
@@ -316,7 +335,6 @@ load_to_mongo("repair_tickets", tickets)
 
 
 # 2. ГЕНЕРАЦИЯ ТЕЛЕМЕТРИИ -> KAFKA
-
 print(f"[6/7] Генерация телеметрии в Kafka (топик: {KAFKA_TOPIC})...")
 
 eq_by_id = {e["equipment_id"]: e for e in equipment}
@@ -336,6 +354,8 @@ def generate_measurement(sensor):
     lo, hi = profile["min"], profile["max"]
     r = random.random()
 
+    if r < 0.95:
+        return random.uniform(lo, hi), "normal"
     if r < 0.99:
         if random.random() < 0.5:
             value = random.uniform(hi, hi * 1.15)
@@ -373,10 +393,8 @@ for day_idx in range(TELEMETRY_DAYS):
         rv = random.random()
 
         if rv < 0.01:
-            # Dirty: N/A или запятая
             value_str = "N/A" if random.random() < 0.5 else f"{value:.1f}".replace(".", ",")
         elif rv < 0.02:
-            # Dirty: выброс
             value_str = f"{value * 200:.1f}"
         else:
             value_str = f"{value:.2f}"
@@ -400,10 +418,8 @@ for day_idx in range(TELEMETRY_DAYS):
             ),
         }
 
-        # Dirty: пустой sensor_id
         if random.random() < 0.02:
             event["sensor_id"] = None
-        # Dirty: неизвестное оборудование
         if random.random() < 0.005:
             event["equipment_id"] = "eq-99999"
 
