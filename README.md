@@ -17,6 +17,31 @@
 5. **Сервинг и BI:** Итоговая витрина отгружается в **MinIO (S3)**, а дашборды строятся в **Grafana**.
 6. **Оркестрация:** Управление пайплайном через **Apache Airflow**.
 
+```mermaid
+graph TD
+    A[Python Generator] -->|JSON| B[(MongoDB)]
+    A -->|Stream| C[Kafka]
+    B -->|Loader| D[(ClickHouse RAW)]
+    C -->|Kafka Engine| D
+    D -->|DQ & Cleansing| E[(ClickHouse MART)]
+    E -->|JDBC| F[PySpark]
+    F -->|Calculate Features| G[(equipment_health_mart)]
+    G -->|Export| H[(MinIO S3)]
+    G -->|Visualize| I[Grafana]
+    J[Apache Airflow] -.->|Orchestrates| F
+    J -.->|Orchestrates| G
+    J -.->|Orchestrates| H
+```
+
+## 💻 Минимальные требования к оборудованию
+
+Проект разворачивает тяжеловесный стек (Spark, Airflow, ClickHouse, Kafka, MongoDB, Grafana, MinIO), поэтому требования к ресурсам довольно высокие:
+
+*   **RAM:** Минимум **8 ГБ** (при 8 ГБ WSL2 может сильно тормозить). Рекомендуется **16 ГБ**.
+*   **CPU:** Минимум **4 ядра**.
+*   **Диск:** Минимум **10 ГБ** свободного места (Docker-образы и данные Kafka/ClickHouse занимают много места).
+*   **ОС:** Windows 10/11 (с WSL2), macOS, Linux.
+
 ## 🛠 Стек технологий
 
 * **Источники:** MongoDB, Apache Kafka
@@ -47,7 +72,7 @@ docker compose run --rm airflow-webserver airflow users create --username airflo
 ```bash
 pip install -r requirements.txt
 python generate.py
-python load_mongo_to_clickhouse.py
+python scripts/load_mongo_to_clickhouse.py
 ```
 
 ### 4. Запуск пайплайна через Airflow
@@ -56,7 +81,7 @@ python load_mongo_to_clickhouse.py
 
 ## 🧮 Формула Health Score
 
-Итоговый балл (`health_score`) рассчитывается как `100 - сумма штрафов`, с ограничением результата в диапазоне от 0 до 100 (используется функция `greatest(0, least(100, ...))`):
+Итоговый балл (`health_score`) рассчитывается как `100 - сумма штрафов`, с ограничением результата в диапазоне от 0 до 100:
 
 * **-20** за аномальную температуру (`temperature_anomaly`)
 * **-15** за частые поломки (`frequent_breakdown` — >=3 ремонтов за 30 дней)
@@ -66,14 +91,35 @@ python load_mongo_to_clickhouse.py
 * **-10** за разрывы в телеметрии (`telemetry_gap_detected` > 4 часов)
 * **-10** за нестабильную работу (`unstable_equipment` — комбинация признаков)
 
+## 📸 Демонстрация работы
+
+### Оркестрация в Apache Airflow
+Граф задач DAG `technoprom_daily_pipeline`: от проверки источников до выгрузки в S3.
+<img src="./screenshots/Airflow.jpg" width="800" alt="Airflow DAG">
+
+### Алерты в Telegram
+Уведомления от Grafana о превышении доли брака и критических температурах.
+<img src="./screenshots/Bot_Alerts.jpg" width="400" alt="Telegram Alerts">
+
+### Правила алертинга в Grafana
+Настроенные правила для мониторинга качества данных и состояния оборудования.
+<img src="./screenshots/Grafana_Alert_Rules.jpg" width="800" alt="Grafana Alert Rules">
+
+### Дашборд в Grafana
+Визуализация контрольных показателей (25 предприятий, 300+ единиц оборудования, 135k+ событий).
+<img src="./screenshots/Screenshot_grafana.jpg" width="800" alt="Grafana Dashboard">
+
+### Итоговая витрина в MinIO (S3)
+Файл `equipment_health_YYYY_MM_DD.parquet`, готовый к загрузке в BI-системы.
+<img src="./screenshots/Minio.jpg" width="800" alt="MinIO Bucket">
+
 ## 📂 Структура проекта
 
 ```text
 technoprom/
-├── Dockerfile.airflow          # Кастомный образ Airflow с библиотеками
+├── Dockerfile.airflow          # Кастомный образ Airflow
 ├── docker-compose.yml          # Инфраструктура
 ├── generate.py                 # Генерация данных (Mongo + Kafka)
-├── load_mongo_to_clickhouse.py # Загрузчик справочников
 ├── requirements.txt            # Python-зависимости
 ├── clickhouse/
 │   └── init/
@@ -84,7 +130,8 @@ technoprom/
 │   └── dags/
 │       └── technoprom_pipeline.py # DAG оркестрации
 ├── scripts/
-│   └── upload_to_minio.py      # Выгрузка витрины в S3
+│   ├── upload_to_minio.py      # Выгрузка витрины в S3
+│   └── load_mongo_to_clickhouse.py # Загрузчик справочников
 └── spark/
     └── jobs/
         └── equipment_health.py # PySpark расчет витрины
