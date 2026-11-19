@@ -1,29 +1,52 @@
+import os
+import datetime
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.sql import types as T
 from pyspark.sql.window import Window
 from py4j.java_gateway import java_import
-import datetime
+
+
+def get_required_env(name: str) -> str:
+    """Возвращает переменную окружения или падает с понятной ошибкой."""
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(
+            f"Переменная окружения '{name}' не задана! "
+            f"Убедитесь, что она проброшена через docker exec -e."
+        )
+    return value
+
+
+# Секреты — обязательны, дефолтов нет
+CH_USER = get_required_env("CLICKHOUSE_USER")
+CH_PASS = get_required_env("CLICKHOUSE_PASSWORD")
+MINIO_ACCESS = get_required_env("MINIO_ACCESS_KEY")
+MINIO_SECRET = get_required_env("MINIO_SECRET_KEY")
 
 # Константы и схемы
 PARTS_SCHEMA = T.ArrayType(T.StructType([
     T.StructField("part_id", T.StringType(), True),
     T.StructField("quantity", T.IntegerType(), True),
-    T.StructField("price", T.DoubleType(), True)
+    T.StructField("price", T.DoubleType(), True),
 ]))
 
 # Инициализация Spark
 spark = SparkSession.builder \
     .appName("EquipmentHealthMart") \
     .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
-    .config("spark.hadoop.fs.s3a.access.key", "minioadmin") \
-    .config("spark.hadoop.fs.s3a.secret.key", "minioadmin") \
+    .config("spark.hadoop.fs.s3a.access.key", MINIO_ACCESS) \
+    .config("spark.hadoop.fs.s3a.secret.key", MINIO_SECRET) \
     .config("spark.hadoop.fs.s3a.path.style.access", "true") \
     .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
     .getOrCreate()
 
 jdbc_url = "jdbc:clickhouse://clickhouse:8123/default"
-jdbc_props = {"user": "default", "password": "changeme", "driver": "com.clickhouse.jdbc.ClickHouseDriver"}
+jdbc_props = {
+    "user": CH_USER,
+    "password": CH_PASS,
+    "driver": "com.clickhouse.jdbc.ClickHouseDriver",
+}
 
 print("Чтение данных из ClickHouse...")
 df_eq = spark.read.jdbc(url=jdbc_url, table="raw_equipment", properties=jdbc_props)
@@ -34,30 +57,30 @@ df_tickets = spark.read.jdbc(url=jdbc_url, table="raw_repair_tickets", propertie
 df_tel = spark.read.jdbc(
     url=jdbc_url,
     table="(SELECT *, toString(event_datetime) AS event_datetime_str FROM mart_telemetry)",
-    properties=jdbc_props
+    properties=jdbc_props,
 )
 
 max_date_row = df_tel.agg(F.max("event_datetime_str")).collect()[0]
 NOW_STR = max_date_row[0]
-NOW_TS = datetime.datetime.strptime(NOW_STR, '%Y-%m-%d %H:%M:%S')
+NOW_TS = datetime.datetime.strptime(NOW_STR, "%Y-%m-%d %H:%M:%S")
 print(f"Расчетная текущая дата (max event_datetime): {NOW_TS}")
 
 # 1. Базовые фичи оборудования
 df_base = df_eq.select(
     "equipment_id", "factory_id", "criticality", "commissioned_at",
-    "last_maintenance_at", "maintenance_interval_days"
+    "last_maintenance_at", "maintenance_interval_days",
 ).withColumn(
     "equipment_age_days",
-    F.datediff(F.to_date(F.lit(NOW_TS)), F.to_date(F.col("commissioned_at")))
+    F.datediff(F.to_date(F.lit(NOW_TS)), F.to_date(F.col("commissioned_at"))),
 ).withColumn(
     "critical_equipment",
-    F.when(F.col("criticality").isin("high", "critical"), True).otherwise(False)
+    F.when(F.col("criticality").isin("high", "critical"), True).otherwise(False),
 ).withColumn(
     "maintenance_overdue",
     F.when(
         F.to_date(F.lit(NOW_TS)) > F.to_date(F.col("last_maintenance_at")) + F.col("maintenance_interval_days"),
-        True
-    ).otherwise(False)
+        True,
+    ).otherwise(False),
 )
 
 # 2. Агрегации по телеметрии
@@ -68,7 +91,7 @@ df_tel_gaps = df_tel.withColumn(
     "gap_hours", (F.unix_timestamp("event_datetime_str") - F.unix_timestamp("prev_dt")) / 3600
 )
 
-cutoff_24h_str = (NOW_TS - datetime.timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+cutoff_24h_str = (NOW_TS - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
 df_tel_24h = df_tel.filter(F.col("event_datetime_str") > cutoff_24h_str).groupBy("equipment_id").agg(
     F.count("*").cast("int").alias("telemetry_events_24h"),
     F.round(F.avg(F.when(F.col("sensor_type") == "temperature", F.col("value"))), 2).alias("avg_temperature_24h"),
@@ -77,22 +100,22 @@ df_tel_24h = df_tel.filter(F.col("event_datetime_str") > cutoff_24h_str).groupBy
     F.count(F.when(
         (F.col("sensor_type") == "temperature") & (F.col("status") == "critical"), True
     )).cast("int").alias("temp_crit_count"),
-    F.count(F.when(F.col("sensor_type") == "temperature", True)).cast("int").alias("temp_total_count")
+    F.count(F.when(F.col("sensor_type") == "temperature", True)).cast("int").alias("temp_total_count"),
 ).withColumn(
     "temperature_anomaly", F.when(F.col("max_temperature_24h") > 85.0, True).otherwise(False)
 ).withColumn(
     "high_temperature_frequency",
-    F.when((F.col("temp_crit_count") / F.col("temp_total_count")) > 0.1, True).otherwise(False)
+    F.when((F.col("temp_crit_count") / F.col("temp_total_count")) > 0.1, True).otherwise(False),
 ).drop("temp_crit_count", "temp_total_count")
 
 df_vib_press = df_tel.groupBy("equipment_id").agg(
     F.max(F.when(F.col("sensor_type") == "vibration", F.col("value"))).alias("max_vib"),
-    F.max(F.when(F.col("sensor_type") == "pressure", F.col("value"))).alias("max_press")
+    F.max(F.when(F.col("sensor_type") == "pressure", F.col("value"))).alias("max_press"),
 ).withColumn(
     "vibration_anomaly", F.when(F.col("max_vib") > 12.0, True).otherwise(False)
 ).withColumn(
     "pressure_anomaly",
-    F.when((F.col("max_press") > 16.0) | (F.col("max_press") < 1.0), True).otherwise(False)
+    F.when((F.col("max_press") > 16.0) | (F.col("max_press") < 1.0), True).otherwise(False),
 ).select("equipment_id", "vibration_anomaly", "pressure_anomaly")
 
 df_gaps_agg = df_tel_gaps.groupBy("equipment_id").agg(
@@ -110,24 +133,24 @@ df_missing = df_active_sensors.join(df_tel_24h_ids, on=["equipment_id", "sensor_
 
 # 3. Агрегации по авариям
 df_failures_clean = df_failures.withColumn("detected_ts", F.to_timestamp("detected_at"))
-now_str = NOW_TS.strftime('%Y-%m-%d %H:%M:%S')
+now_str = NOW_TS.strftime("%Y-%m-%d %H:%M:%S")
 
 df_fail_agg = df_failures_clean.groupBy("equipment_id").agg(
     F.count(F.when(
         (F.col("detected_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 7 DAY"))
         & (F.col("severity") == "critical"),
-        True
+        True,
     )).cast("int").alias("critical_events_7d"),
     F.count(F.when(
         (F.col("detected_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 7 DAY"))
         & (F.col("severity") == "warning"),
-        True
+        True,
     )).cast("int").alias("warning_events_7d"),
     F.count(F.when(
         (F.hour("detected_ts").between(22, 23)) | (F.hour("detected_ts").between(0, 6)),
-        True
+        True,
     )).alias("night_fails_raw"),
-    F.count(F.when(F.dayofweek("detected_ts").isin(1, 7), True)).alias("weekend_fails_raw")
+    F.count(F.when(F.dayofweek("detected_ts").isin(1, 7), True)).alias("weekend_fails_raw"),
 ).withColumn(
     "night_failures", F.when(F.col("night_fails_raw") > 0, True).otherwise(False)
 ).withColumn(
@@ -153,26 +176,24 @@ df_tickets_clean = df_tickets.withColumn(
 
 df_tickets_agg = df_tickets_clean.groupBy("equipment_id").agg(
     F.count(F.when(
-        F.col("created_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 30 DAY"),
-        True
+        F.col("created_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 30 DAY"), True
     )).cast("int").alias("repairs_30d"),
     F.count(F.when(
-        F.col("created_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 90 DAY"),
-        True
+        F.col("created_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 90 DAY"), True
     )).cast("int").alias("repairs_90d"),
     F.sum(F.when(
         F.col("created_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 30 DAY"),
-        F.col("downtime_minutes")
+        F.col("downtime_minutes"),
     )).cast("double").alias("total_downtime_30d"),
     F.avg("downtime_minutes").alias("avg_repair_duration"),
     F.sum(F.when(
         F.col("created_ts") > F.expr(f"CAST('{now_str}' AS TIMESTAMP) - INTERVAL 30 DAY"),
-        F.col("parts_cost")
+        F.col("parts_cost"),
     )).alias("parts_cost_30d"),
-    F.max("finished_ts").alias("last_finished_ts")
+    F.max("finished_ts").alias("last_finished_ts"),
 ).withColumn(
     "days_since_last_repair",
-    F.datediff(F.to_date(F.lit(NOW_TS)), F.to_date(F.col("last_finished_ts")))
+    F.datediff(F.to_date(F.lit(NOW_TS)), F.to_date(F.col("last_finished_ts"))),
 ).withColumn(
     "frequent_breakdown", F.when(F.col("repairs_30d") >= 3, True).otherwise(False)
 ).withColumn(
@@ -204,12 +225,12 @@ bool_cols = [
     "frequent_breakdown", "sensor_data_missing", "telemetry_gap_detected",
     "high_temperature_frequency", "night_failures", "weekend_failures",
     "critical_equipment", "maintenance_overdue", "recently_repaired",
-    "failure_after_recent_repair", "high_service_cost"
+    "failure_after_recent_repair", "high_service_cost",
 ]
 num_cols = [
     "telemetry_events_24h", "critical_events_7d", "warning_events_7d", "repairs_30d",
     "repairs_90d", "total_downtime_30d", "parts_cost_30d", "avg_temperature_24h",
-    "max_temperature_24h", "avg_vibration_24h", "days_since_last_repair", "avg_repair_duration"
+    "max_temperature_24h", "avg_vibration_24h", "days_since_last_repair", "avg_repair_duration",
 ]
 
 df_mart = df_mart.fillna(0, subset=num_cols).fillna(False, subset=bool_cols)
@@ -218,8 +239,8 @@ df_mart = df_mart.withColumn(
     "unstable_equipment",
     F.when(
         F.col("frequent_breakdown") | F.col("temperature_anomaly") | F.col("vibration_anomaly"),
-        True
-    ).otherwise(False)
+        True,
+    ).otherwise(False),
 )
 
 # 6. Health Score
@@ -236,7 +257,7 @@ df_mart = df_mart.withColumn(
             - (CASE WHEN telemetry_gap_detected THEN 10 ELSE 0 END)
             - (CASE WHEN unstable_equipment THEN 10 ELSE 0 END)
         ))
-    """)
+    """),
 )
 
 final_cols = [
@@ -249,7 +270,7 @@ final_cols = [
     "sensor_data_missing", "telemetry_gap_detected", "high_temperature_frequency",
     "night_failures", "weekend_failures", "critical_equipment", "maintenance_overdue",
     "recently_repaired", "failure_after_recent_repair", "high_service_cost",
-    "unstable_equipment", "health_score"
+    "unstable_equipment", "health_score",
 ]
 
 df_final = df_mart.select(*final_cols)
@@ -267,9 +288,9 @@ tmp_path = f"s3a://{bucket_name}/tmp_output"
 
 df_final.coalesce(1).write.format("parquet").mode("overwrite").save(tmp_path)
 
-java_import(spark._jvm, 'org.apache.hadoop.fs.Path')
-java_import(spark._jvm, 'org.apache.hadoop.fs.FileSystem')
-java_import(spark._jvm, 'java.net.URI')
+java_import(spark._jvm, "org.apache.hadoop.fs.Path")
+java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
+java_import(spark._jvm, "java.net.URI")
 
 hadoop_conf = spark._jsc.hadoopConfiguration()
 fs = spark._jvm.FileSystem.get(spark._jvm.URI(f"s3a://{bucket_name}"), hadoop_conf)
